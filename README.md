@@ -1,7 +1,7 @@
 # VOXR
 ### Vox Populi. Distilled.
 
-Voxr is a purpose-built epistemic instrument for Reddit. It finds discussions, evaluates sources, surfaces buried dissent, weights claims by the credibility of who made them, tracks when opinion shifted — and lets you audit every verdict against the exact comment that earned it.
+Voxr is a purpose-built epistemic instrument for Reddit. It finds discussions across communities, distills them into a sourced editorial brief, surfaces buried dissent, weights claims by account credibility, tracks when opinions shifted — and lets you audit every verdict against the exact comment that earned it.
 
 ---
 
@@ -11,11 +11,12 @@ Voxr is a purpose-built epistemic instrument for Reddit. It finds discussions, e
 |---|---|---|
 | Multi-thread topic search | ✗ (URL required) | ✓ |
 | Dissent & correction chain detection | ✗ | ✓ |
-| Account credibility scoring | ✗ | ✓ |
+| Account credibility scoring (age × karma) | ✗ | ✓ |
 | Temporal shift detection | ✗ | ✓ |
 | Community bias flags | ✗ | ✓ |
-| Inspectable citations (click → raw comment) | ✗ | ✓ |
+| Inspectable citations (click → raw comment drawer) | ✗ | ✓ |
 | Structural hallucination prevention | ✗ | ✓ |
+| Error classification (private / deleted / empty threads) | ✗ | ✓ |
 
 ---
 
@@ -25,13 +26,14 @@ Voxr is a purpose-built epistemic instrument for Reddit. It finds discussions, e
 |---|---|
 | Frontend | React + Vite |
 | Backend | FastAPI |
-| Reddit data | PRAW (full comment tree + metadata) |
+| Reddit data | PRAW + prawcore (full comment tree + metadata) |
 | LLM | Groq — Llama 3.3 70B (128K context) |
-| Session store | In-memory (swap for Redis in production) |
+| Session store | Redis (auto-fallback to in-memory) |
+| Hosting | Render (API) + Vercel (frontend) |
 
 ---
 
-## Getting started
+## Quick start — local dev
 
 ### 1. Clone and configure
 
@@ -39,40 +41,24 @@ Voxr is a purpose-built epistemic instrument for Reddit. It finds discussions, e
 git clone <your-repo>
 cd voxr
 cp .env.example .env
-# Fill in your credentials in .env
+# Fill in your Reddit API and Groq credentials
 ```
 
-**You need:**
-- A Reddit API app (script type) → [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)
-- A Groq API key → [console.groq.com](https://console.groq.com)
+You need:
+- **Reddit API app** (script type) → [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)
+- **Groq API key** → [console.groq.com](https://console.groq.com)
 
-### 2. Run everything
+### 2. Run
 
 ```bash
 chmod +x start.sh
-./start.sh
+
+./start.sh           # local dev — in-memory sessions
+./start.sh docker    # full stack with Redis (requires Docker)
 ```
 
-This starts the backend on `http://localhost:8000` and frontend on `http://localhost:5173`.
-
-### 3. Manual setup (if you prefer)
-
-**Backend:**
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp ../.env.example ../.env      # fill in credentials
-uvicorn main:app --reload --port 8000
-```
-
-**Frontend:**
-```bash
-cd frontend
-npm install
-npm run dev
-```
+Frontend → `http://localhost:5173`  
+Backend → `http://localhost:8000`
 
 ---
 
@@ -81,25 +67,28 @@ npm run dev
 ```
 voxr/
 ├── backend/
-│   ├── main.py              # FastAPI app — all routes + intelligence pipeline
-│   └── requirements.txt
+│   ├── main.py              # FastAPI app — full intelligence pipeline
+│   └── requirements.txt     # fastapi, praw, prawcore, groq, redis
 ├── frontend/
 │   ├── index.html
 │   ├── package.json
-│   ├── vite.config.js       # proxies /api → localhost:8000
+│   ├── vite.config.js
+│   ├── vercel.json          # Vercel deploy config
 │   └── src/
 │       ├── App.jsx
 │       ├── api.js
 │       ├── main.jsx
-│       ├── styles/
-│       │   └── globals.css
+│       ├── styles/globals.css
 │       ├── pages/
 │       │   ├── SearchScreen.jsx
-│       │   └── ChatScreen.jsx
+│       │   └── ChatScreen.jsx   # includes ThreadErrorPane
 │       └── components/
-│           ├── ChatMessage.jsx      # markdown renderer + citation chips
-│           ├── CitationDrawer.jsx   # side drawer showing raw comment
-│           └── StatsSidebar.jsx     # thread intelligence stats
+│           ├── ChatMessage.jsx
+│           ├── CitationDrawer.jsx
+│           └── StatsSidebar.jsx
+├── Dockerfile
+├── docker-compose.yml       # API + Redis + frontend
+├── render.yaml              # Render deploy config (API + Redis)
 ├── .env.example
 ├── start.sh
 └── README.md
@@ -107,53 +96,106 @@ voxr/
 
 ---
 
-## How the grounding contract works
+## Session store
+
+Sessions are stored in Redis when `REDIS_URL` is set. If it's unset or unavailable, the app silently falls back to an in-memory dict — no code change needed.
+
+| Mode | How to use |
+|---|---|
+| In-memory (local) | Leave `REDIS_URL` blank |
+| Redis (docker) | `./start.sh docker` |
+| Redis (production) | Set `REDIS_URL` env var on Render — handled automatically by `render.yaml` |
+
+Sessions have a 2-hour TTL. History is trimmed to the last 40 turns to stay within context limits.
+
+---
+
+## Error handling
+
+The backend classifies PRAW failures before they surface to the UI:
+
+| Code | Cause | Frontend display |
+|---|---|---|
+| `private` | Subreddit/post is private or quarantined | ⊘ Private or Quarantined |
+| `not_found` | Thread deleted or URL wrong | ⌀ Thread Not Found |
+| `deleted` | Post removed by author or mods | ⌀ Thread Deleted |
+| `empty` | Thread has no readable comments | ∅ No Comments Yet |
+| `rate_limited` | Reddit 429 — too many requests | ⏳ Rate Limited |
+| `unknown` | Anything else | ⚠ Load Failed |
+
+The UI renders a full-pane error state with a back button — no crashing, no empty loading spinners.
+
+---
+
+## Grounding contract
 
 Every claim Voxr makes is structurally required to cite a comment from the PRAW payload. The system prompt enforces one rule:
 
 > *If you cannot cite it, you cannot say it.*
 
-The `[1]` `[2]` `[3]` markers in the output are the enforcement mechanism — not a UI flourish. Clicking any citation opens a side drawer with the raw Reddit comment, author credibility score, era, and a direct link to the source. Every verdict is fully auditable.
+The `[1]` `[2]` `[3]` markers are the enforcement mechanism. Clicking any of them opens a side drawer with the raw comment, author credibility score, temporal era, and a direct Reddit link. Every verdict is fully auditable.
 
 ---
 
-## Intelligence pipeline (what runs on every thread load)
+## Intelligence pipeline (runs on every thread load)
 
 1. **PRAW fetch** — full comment forest with `replace_more(limit=20)`
-2. **Correction chain detection** — replies that contradict high-scoring parents
-3. **Credibility scoring** — `log(account_age) × log(karma)`, normalised 0–1
+2. **Correction chain detection** — contradiction signals in replies to high-scoring parents
+3. **Credibility scoring** — `log(account_age_days) × log(comment_karma)`, normalised 0–1
 4. **Temporal binning** — hot take (0–6h) / considered (6–24h) / settled (24h+)
-5. **Consensus skew** — top comment score / total score mass; >0.6 = bias flag
-6. **Temporal shift detection** — significant score delta between eras
-7. **Brief generation** — Front Page + Debate Transcript (conditional), via Groq
+5. **Consensus skew** — top comment score ÷ total score mass; > 0.6 = bias flag
+6. **Temporal shift detection** — score delta > 50 between hot take and settled eras
+7. **Brief generation** — Front Page + conditional Debate Transcript via Groq
 
 ---
 
-## API endpoints
+## API
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/search` | Search Reddit for threads matching a topic |
-| `POST` | `/load` | Fetch thread, run intelligence pipeline, generate brief |
-| `POST` | `/chat` | Multi-turn conversation with loaded thread context |
-| `POST` | `/session/new` | Create a new session |
-| `GET` | `/session/{id}/stats` | Get intelligence stats for a session |
-| `DELETE` | `/session/{id}` | Clear a session |
-| `GET` | `/health` | Health check |
+| `POST` | `/search` | Search Reddit by topic |
+| `POST` | `/load` | Fetch thread, run pipeline, generate brief |
+| `POST` | `/chat` | Multi-turn conversation |
+| `POST` | `/session/new` | Create session |
+| `GET` | `/session/{id}/stats` | Intelligence stats |
+| `DELETE` | `/session/{id}` | Clear session |
+| `GET` | `/health` | Health + session store type |
 
 ---
 
-## Deployment notes
+## Deployment
 
-- **Backend**: Deploy to [Render](https://render.com) as a Python web service. Set environment variables in the dashboard.
-- **Frontend**: Deploy to [Vercel](https://vercel.com). Set `VITE_API_URL` if your backend isn't on the same domain, and update the Vite proxy config.
-- **Sessions**: The in-memory session store resets on restart. For production, swap `sessions: dict` for a Redis client (`redis-py`).
+### Render (backend + Redis)
+
+```bash
+# Push to GitHub, then in Render dashboard:
+# New → Blueprint → connect repo → render.yaml is picked up automatically
+```
+
+Set env vars in Render dashboard: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `GROQ_API_KEY`, `FRONTEND_URL`.  
+`REDIS_URL` is wired automatically from `render.yaml`.
+
+### Vercel (frontend)
+
+```bash
+cd frontend
+npx vercel
+```
+
+Update `vercel.json` → replace `your-voxr-api.onrender.com` with your actual Render URL. Then set `FRONTEND_URL` in Render to your Vercel URL.
+
+### Docker (self-host)
+
+```bash
+cp .env.example .env   # fill credentials
+docker compose up --build
+```
 
 ---
 
-## Reddit API rate limits
+## Rate limiting
 
-PRAW handles OAuth automatically. The Reddit API allows 60 requests/minute for script apps. For heavy usage, add a request queue or deploy multiple instances with different credentials.
+The backend uses a token-bucket limiter (0.8 tokens/sec, burst of 8) to stay within Reddit's ~60 req/min limit for script apps. Searches consume 1 token; thread loads consume 2. Requests block and retry for up to 30 seconds before returning a 429.
 
 ---
 

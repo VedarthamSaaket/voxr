@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: voxr-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: REDDIT_CLIENT_ID
+        sync: false
+      - key: REDDIT_CLIENT_SECRET
+        sync: false
+      - key: REDDIT_USER_AGENT
+        value: voxr/1.1
+      - key: REDDIT_USERNAME
+        sync: false
+      - key: REDDIT_PASSWORD
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: voxr-redis
+          property: connectionString
+      - key: FRONTEND_URL
+        sync: false
+
+  - type: redis
+    name: voxr-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
